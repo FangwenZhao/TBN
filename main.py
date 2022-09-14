@@ -52,8 +52,8 @@ def get_parser():
     # transfer related
     parser.add_argument('--transfer_loss_weight', type=float, default=0.75)
     parser.add_argument('--transfer_loss', type=str, default='none')
-    parser.add_argument('--conf_threshold', type=float, default=1)
-    parser.add_argument('--cur_num', type=int, default=1)
+    parser.add_argument('--it', type=int, default=1)
+
 
     return parser
 
@@ -130,14 +130,14 @@ def test(model, target_test_loader, args):
     acc = 100. * correct / len_target_dataset
     return acc, test_loss.avg
 
-
 def train(source_loader, target_train_loader, target_test_loader, model, optimizer, lr_scheduler, args):
     len_source_loader = len(source_loader)
     len_target_loader = len(target_train_loader)
     n_batch = min(len_source_loader, len_target_loader)
     if n_batch == 0:
         n_batch = args.n_iter_per_epoch
-
+    save_root = './results/test_v1/' + args.src_domain + '_' + args.tgt_domain \
+                + '_' + str(args.seed)
     iter_source, iter_target = iter(source_loader), iter(target_train_loader)
 
     best_acc = 0
@@ -145,9 +145,6 @@ def train(source_loader, target_train_loader, target_test_loader, model, optimiz
 
     for e in range(1, args.n_epoch + 1):
         model.train()
-        # train_loss_clf = utils.AverageMeter()
-        # train_loss_total = utils.AverageMeter()
-
         model.epoch_based_processing(n_batch)
 
         if max(len_target_loader, len_source_loader) != 0:
@@ -158,8 +155,8 @@ def train(source_loader, target_train_loader, target_test_loader, model, optimiz
         correct2 = 0
 
         for i in range(n_batch):
-            data_source, label_source = next(iter_source)
-            data_target, label_target = next(iter_target)
+            data_source, label_source = next(iter_source)  # .next()
+            data_target, label_target = next(iter_target)  # .next()
 
             data_source, label_source = data_source.to(
                 args.device), label_source.to(args.device)
@@ -170,15 +167,7 @@ def train(source_loader, target_train_loader, target_test_loader, model, optimiz
             source_loss, features, target_label = model(data_source, data_target, label_source)
             correct += torch.sum(target_label[1] == label_target)
 
-            # optimizer.zero_grad()
-            # source_loss.backward()
-            # optimizer.step()
-            # if lr_scheduler:
-            #     lr_scheduler.step()
-
-            conf_threshold = args.conf_threshold / (1. + np.exp(-0.1 * e))
-            target_label, labels_tar, target_loss = model(None, features, target_label, conf_threshold)
-
+            target_label, labels_tar, target_loss = model(None, features, target_label, args.it)
             correct1 += torch.sum(labels_tar == label_target)
             correct2 += torch.sum(target_label == label_target)
 
@@ -191,9 +180,6 @@ def train(source_loader, target_train_loader, target_test_loader, model, optimiz
             optimizer.step()
             if lr_scheduler:
                 lr_scheduler.step()
-
-            # train_loss_clf.update(source_loss.item())
-            # train_loss_total.update(loss.item())
 
         acc = 100. * correct / (n_batch * args.batch_size)
         acc1 = 100. * correct1 / (n_batch * args.batch_size)
@@ -208,16 +194,19 @@ def train(source_loader, target_train_loader, target_test_loader, model, optimiz
         test_acc, test_loss = test(model, target_test_loader, args)
         info += ', Test_acc: {:.4f}'.format(test_acc)
 
-
         if best_acc < test_acc:
             best_acc = test_acc
             stop = 0
         if best_acc == 100:
             break
-
+            # state = {'model': model.state_dict(),
+            #          'optimizer': optimizer.state_dict(),
+            #          'epoch': e}
+            # torch.save(state, save_root + '_best.pth')
         if args.early_stop > 0 and stop >= args.early_stop:
             break
         print(info)
+
     print('Transfer result: {:.4f}'.format(best_acc))
 
 

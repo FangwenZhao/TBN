@@ -4,7 +4,7 @@ backbone: resnet50
 # Transfer loss related
 transfer_loss_weight: 1
 transfer_loss: none
-conf_threshold: 1
+
 
 # Optimizer related
 lr: 0.01

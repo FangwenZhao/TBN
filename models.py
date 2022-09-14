@@ -3,11 +3,12 @@ import math
 import numpy as np
 import torch
 import torch.nn as nn
-
-
+#from torch import cdist
+from scipy.spatial.distance import cdist
+from loss_funcs.gauss_activation import Gauss
 from transfer_losses import TransferLoss
 import backbones
-
+from sklearn.cluster import KMeans
 
 class TransferNet(nn.Module):
     def __init__(self, num_class, base_net='resnet50', transfer_loss='mmd',  bottleneck_width=256, max_iter=1000, kernel=16,**kwargs):
@@ -39,38 +40,38 @@ class TransferNet(nn.Module):
         self.adapt_loss = TransferLoss(**transfer_loss_args)
         self.criterion = torch.nn.CrossEntropyLoss()
         self.Criterion = torch.nn.CrossEntropyLoss(reduction='none')
+        self.features=[]
+        self.labels_val=[]
+        self.labels_conf=[]
+        self.distances = torch.zeros([num_class, bottleneck_width], device='cuda')
 
-    def target_clusters(self,feature, labels,num_class, threshold=0.8):
 
-        label_value = labels[1]
-        label_conf = labels[0]
-        batch_size = label_conf.nelement()
+    def target_clusters(self,num_class=31, threshold=0.8):
 
-        mask_conf_sum = math.floor(threshold * batch_size)
-        mask_conf = label_conf>torch.topk(label_conf, mask_conf_sum)[0][...,-1,None]
+        features = self.features[-1]
+        label_value = self.labels_val[-1]
+        label_conf = self.labels_conf[-1]
 
-        # 计算样本之间的L2距离
-        total0 = feature.unsqueeze(0).expand(
-            int(feature.size(0)), int(feature.size(0)), int(feature.size(1)))  # 64，64，256  64个total
-        total1 = feature.unsqueeze(1).expand(
-            int(feature.size(0)), int(feature.size(0)),
-            int(feature.size(1)))  # 64,64,256
-        L2_distance = torch.tensor(total0 - total1, dtype=torch.float)
-        L2_distance = torch.norm(L2_distance, p="fro", dim=2)
-        L2_distance.masked_fill_(~mask_conf, 0)  # 对低置信度的样本的距离使用0进行填充
+        for i in range(len( self.features)-1):
+            features=torch.cat((features,self.features[i]))
+            label_value=torch.cat((label_value, self.labels_val[i ]))
+            label_conf=torch.cat((label_conf, self.labels_conf[i ]))
 
-        conf_tmp = label_conf.unsqueeze(1)
-        conf_mat = conf_tmp @ conf_tmp.t()
-        L2_distance = torch.mul(L2_distance, conf_mat)
-        label_conf.masked_fill_(~mask_conf, 0)
-        distances = torch.zeros([batch_size, num_class],device='cuda')
-        class_counts = torch.zeros([num_class], device='cuda')
-        for i in range(num_class):
-            for j in range(batch_size):
+        feature = self.features[-1]
+        batch_size = feature.size(0)
+        bs = features.size(0)
+
+        L2_distance = cdist(feature.data.cpu(), features.data.cpu(), 'cosine')
+        L2_distance=torch.tensor(L2_distance).cuda()
+        distances = torch.zeros([batch_size, num_class], device='cuda')
+
+        for j in range(bs):
+            for i in range(num_class):
                 if i == label_value[j]:
                     distances[:, i] += L2_distance[:, j]  # 相同类别的样本之间的距离相加
-                    class_counts[i] += label_conf[j]
+                    break
 
+        class_counts = torch.bincount(label_value, minlength=num_class)
         mask_counts = torch.nonzero(class_counts).squeeze(1)
 
         class_counts[class_counts == 0] = 100
@@ -78,13 +79,23 @@ class TransferNet(nn.Module):
         distances = torch.index_select(distances, dim=1, index=mask_counts)  # 选出该批次中 符合要求的类别
         labels = torch.argmin(distances, 1)
         labels_tar = mask_counts[labels]
-
+        self.labels_val.pop()
+        self.labels_val.append(labels_tar)
         return labels_tar
 
-    def forward(self, source, target, labels,threshold=1):
+    def forward(self, source, target, labels,it=0):
         if source==None:
             target_feature = self.bottleneck_layer1(target)
-            labels_ = self.target_clusters(target_feature, labels, self.num_class,threshold)
+            if len( self.features)>it:
+                self.features.pop(0)
+                self.labels_val.pop(0)
+                self.labels_conf.pop(0)
+            self.features.append(target_feature)
+            self.labels_val.append(labels[1])
+            self.labels_conf.append(labels[0])
+
+            with torch.no_grad():
+                labels_ = self.target_clusters(self.num_class)
             labels_post=self.target_classifier_layer(target_feature)
 
             clf_loss = self.criterion(labels_post, labels_)
@@ -114,6 +125,7 @@ class TransferNet(nn.Module):
         return source_loss,target_f.detach(), target_label
 
 
+
     def get_parameters(self, initial_lr=1.0):
         params = [
             {'params': self.base_network.parameters(), 'lr': 0.1 * initial_lr},
@@ -140,8 +152,6 @@ class TransferNet(nn.Module):
         x = self.base_network(x)
         x = self.bottleneck_layer1(x)
         clf = self.target_classifier_layer(x)
-        # x = self.bottleneck_layer(x)
-        # clf = self.source_classifier_layer(x)
         return clf
 
 
